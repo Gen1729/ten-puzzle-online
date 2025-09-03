@@ -22,7 +22,14 @@ export default function Home() {
           {/* プレイ開始ボタン */}
           <Link href="/game">
             <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-8 my-4 rounded-lg text-lg transition-colors duration-200 shadow-lg hover:shadow-xl">
-              ゲームを始める
+              ソロプレイ
+            </button>
+          </Link>
+
+          {/* オンライン対戦ボタン */}
+          <Link href="/online">
+            <button className="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-4 px-8 my-4 rounded-lg text-lg transition-colors duration-200 shadow-lg hover:shadow-xl">
+              オンライン対戦
             </button>
           </Link>
 
