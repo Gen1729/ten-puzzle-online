@@ -9,7 +9,7 @@ const port = process.env.PORT || 3000;
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
 
-// 問題データ
+// 問題データファイルを直接読み込み
 const easyProblems = [
   '1124', '1223', '1478', '2468', '0446', '1118', '1355', '2466',
   '1258', '2378', '0255', '1268', '2888', '3337', '3777', '4666',
@@ -186,7 +186,10 @@ app.prepare().then(() => {
             isActive: false
           },
           problemSequence: generateProblemSequence(), // 共通の問題シーケンス
-          currentProblemIndex: 0 // 現在の問題インデックス
+          currentProblemIndex: 0, // 現在の問題インデックス
+          waitingCountdown: null, // 30秒待機カウントダウン
+          startCountdown: null, // 3秒開始カウントダウン
+          waitingTimer: null // 待機タイマーの参照
         });
       }
 
@@ -218,7 +221,70 @@ app.prepare().then(() => {
         players: room.players
       });
 
-      console.log(`Player ${playerName} joined room ${roomId}`);
+      console.log(`Player ${playerName} joined room ${roomId}. Total players: ${room.players.length}`);
+
+      // 4人になったら即座に3秒カウントダウンを開始
+      if (room.players.length === 4 && !room.gameState.isActive) {
+        // 既存の待機カウントダウンがあればキャンセル
+        if (room.waitingTimer) {
+          clearInterval(room.waitingTimer);
+          room.waitingTimer = null;
+        }
+        room.waitingCountdown = null;
+        
+        console.log(`4 players joined! Starting immediate 3-second countdown for room ${roomId}`);
+        room.startCountdown = 3;
+        io.to(roomId).emit('start-countdown-begin', { countdown: 3 });
+        
+        const startTimer = setInterval(() => {
+          room.startCountdown -= 1;
+          io.to(roomId).emit('start-countdown-update', { countdown: room.startCountdown });
+          
+          if (room.startCountdown <= 0) {
+            clearInterval(startTimer);
+            room.startCountdown = null;
+            
+            // ゲーム自動開始
+            startGameForRoom(roomId, room, io);
+          }
+        }, 1000);
+      }
+      // 2人になったら30秒の待機カウントダウンを開始（4人未満の場合のみ）
+      else if (room.players.length === 2 && !room.gameState.isActive && !room.waitingCountdown && !room.startCountdown) {
+        console.log(`Starting 30-second waiting countdown for room ${roomId}`);
+        room.waitingCountdown = 30;
+        
+        io.to(roomId).emit('waiting-countdown-start', { countdown: 30 });
+        
+        room.waitingTimer = setInterval(() => {
+          room.waitingCountdown -= 1;
+          io.to(roomId).emit('waiting-countdown-update', { countdown: room.waitingCountdown });
+          
+          if (room.waitingCountdown <= 0) {
+            clearInterval(room.waitingTimer);
+            room.waitingTimer = null;
+            room.waitingCountdown = null;
+            
+            // 3秒の開始カウントダウンを開始
+            console.log(`Starting 3-second start countdown for room ${roomId}`);
+            room.startCountdown = 3;
+            io.to(roomId).emit('start-countdown-begin', { countdown: 3 });
+            
+            const startTimer = setInterval(() => {
+              room.startCountdown -= 1;
+              io.to(roomId).emit('start-countdown-update', { countdown: room.startCountdown });
+              
+              if (room.startCountdown <= 0) {
+                clearInterval(startTimer);
+                room.startCountdown = null;
+                
+                // ゲーム自動開始
+                startGameForRoom(roomId, room, io);
+              }
+            }, 1000);
+          }
+        }, 1000);
+      }
     });
 
     // 数字更新
@@ -353,57 +419,74 @@ app.prepare().then(() => {
       }
     });
 
-    // ゲーム開始
+    // ゲーム開始の共通ロジック
+    const startGameForRoom = (roomId, room, io) => {
+      room.gameState.isActive = true;
+      room.gameState.timeLeft = 180;
+      
+      // 全員が最初の問題から開始
+      room.currentProblemIndex = 0;
+      const firstProblem = room.problemSequence[0];
+      
+      console.log(`Game started with problem sequence. First problem (${firstProblem.difficulty}): ${firstProblem.originalProblem}`);
+      console.log('Problem sequence preview:', room.problemSequence.slice(0, 10).map((p, i) => `${i+1}. ${p.difficulty}:${p.originalProblem}`));
+      
+      // 全プレイヤーを最初の問題にリセット
+      room.players.forEach(player => {
+        player.problemIndex = 0;
+        player.currentNumbers = firstProblem.numbers;
+      });
+
+      io.to(roomId).emit('game-started', {
+        gameState: room.gameState
+      });
+
+      // タイマー開始
+      const timer = setInterval(() => {
+        room.gameState.timeLeft -= 1;
+        io.to(roomId).emit('time-update', room.gameState.timeLeft);
+
+        if (room.gameState.timeLeft <= 0) {
+          clearInterval(timer);
+          room.gameState.isActive = false;
+          
+          // 最終結果を準備
+          const finalPlayers = room.players
+            .map(p => ({
+              name: p.name,
+              score: p.score,
+              correct: p.correct,
+              wrong: p.wrong,
+              skip: p.skip
+            }))
+            .sort((a, b) => b.score - a.score);
+
+          io.to(roomId).emit('game-ended', {
+            players: finalPlayers,
+            roomId: roomId,
+            gameTime: 180
+          });
+        }
+      }, 1000);
+    };
+
+    // ゲーム開始（手動）
     socket.on('start-game', (roomId) => {
       const room = gameRooms.get(roomId);
-      if (room) {
-        room.gameState.isActive = true;
-        room.gameState.timeLeft = 180;
+      if (room && !room.gameState.isActive) {
+        // 既存のカウントダウンがあればキャンセル
+        if (room.waitingTimer) {
+          clearInterval(room.waitingTimer);
+          room.waitingTimer = null;
+        }
+        if (room.waitingCountdown !== null) {
+          room.waitingCountdown = null;
+        }
+        if (room.startCountdown !== null) {
+          room.startCountdown = null;
+        }
         
-        // 全員が最初の問題から開始
-        room.currentProblemIndex = 0;
-        const firstProblem = room.problemSequence[0];
-        
-        console.log(`Game started with problem sequence. First problem (${firstProblem.difficulty}): ${firstProblem.originalProblem}`);
-        console.log('Problem sequence preview:', room.problemSequence.slice(0, 10).map((p, i) => `${i+1}. ${p.difficulty}:${p.originalProblem}`));
-        
-        // 全プレイヤーを最初の問題にリセット
-        room.players.forEach(player => {
-          player.problemIndex = 0;
-          player.currentNumbers = firstProblem.numbers;
-        });
-
-        io.to(roomId).emit('game-started', {
-          gameState: room.gameState
-        });
-
-        // タイマー開始
-        const timer = setInterval(() => {
-          room.gameState.timeLeft -= 1;
-          io.to(roomId).emit('time-update', room.gameState.timeLeft);
-
-          if (room.gameState.timeLeft <= 0) {
-            clearInterval(timer);
-            room.gameState.isActive = false;
-            
-            // 最終結果を準備
-            const finalPlayers = room.players
-              .map(p => ({
-                name: p.name,
-                score: p.score,
-                correct: p.correct,
-                wrong: p.wrong,
-                skip: p.skip
-              }))
-              .sort((a, b) => b.score - a.score);
-
-            io.to(roomId).emit('game-ended', {
-              players: finalPlayers,
-              roomId: roomId,
-              gameTime: 180
-            });
-          }
-        }, 1000);
+        startGameForRoom(roomId, room, io);
       }
     });
 

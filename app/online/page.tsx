@@ -27,6 +27,8 @@ export default function OnlineGamePage() {
   const [formula, setFormula] = useState('');
   const [usedNumbers, setUsedNumbers] = useState<boolean[]>([false, false, false, false]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [waitingCountdown, setWaitingCountdown] = useState<number | null>(null);
+  const [startCountdown, setStartCountdown] = useState<number | null>(null);
 
   // プレイヤーを順位順にソートし、同順位を考慮した順位を計算する関数
   const calculateRankings = (players: Array<{
@@ -175,6 +177,48 @@ export default function OnlineGamePage() {
       socket.off('game-ended', handleGameEnded);
     };
   }, [socket, router]);
+
+  // カウントダウンイベントを処理
+  useEffect(() => {
+    if (!socket) return;
+
+    const handleWaitingCountdownStart = (data: { countdown: number }) => {
+      console.log('Waiting countdown started:', data.countdown);
+      setWaitingCountdown(data.countdown);
+    };
+
+    const handleWaitingCountdownUpdate = (data: { countdown: number }) => {
+      console.log('Waiting countdown update:', data.countdown);
+      setWaitingCountdown(data.countdown);
+    };
+
+    const handleStartCountdownBegin = (data: { countdown: number }) => {
+      console.log('Start countdown began:', data.countdown);
+      setWaitingCountdown(null);
+      setStartCountdown(data.countdown);
+    };
+
+    const handleStartCountdownUpdate = (data: { countdown: number }) => {
+      console.log('Start countdown update:', data.countdown);
+      setStartCountdown(data.countdown);
+      
+      if (data.countdown === 0) {
+        setStartCountdown(null);
+      }
+    };
+
+    socket.on('waiting-countdown-start', handleWaitingCountdownStart);
+    socket.on('waiting-countdown-update', handleWaitingCountdownUpdate);
+    socket.on('start-countdown-begin', handleStartCountdownBegin);
+    socket.on('start-countdown-update', handleStartCountdownUpdate);
+
+    return () => {
+      socket.off('waiting-countdown-start', handleWaitingCountdownStart);
+      socket.off('waiting-countdown-update', handleWaitingCountdownUpdate);
+      socket.off('start-countdown-begin', handleStartCountdownBegin);
+      socket.off('start-countdown-update', handleStartCountdownUpdate);
+    };
+  }, [socket]);
 
   // ルーム参加処理
   const handleJoinRoom = () => {
@@ -456,13 +500,28 @@ export default function OnlineGamePage() {
               ルーム: <span className="text-blue-600">{roomId}</span>
             </div>
             <div className="text-lg">
-              {!gameState?.isActive && players.length > 1 && (
+              {waitingCountdown !== null && (
+                <div className="text-yellow-600 font-bold">
+                  待機中: {waitingCountdown}秒
+                </div>
+              )}
+              {startCountdown !== null && (
+                <div className="text-red-600 font-bold text-3xl animate-pulse">
+                  開始まで: {startCountdown}
+                </div>
+              )}
+              {!gameState?.isActive && !waitingCountdown && !startCountdown && players.length >= 2 && (
                 <button
                   onClick={handleStartGame}
                   className="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg"
                 >
                   ゲーム開始
                 </button>
+              )}
+              {!gameState?.isActive && players.length < 2 && !waitingCountdown && !startCountdown && (
+                <div className="text-gray-500">
+                  プレイヤーを待機中...
+                </div>
               )}
             </div>
           </div>
@@ -471,50 +530,90 @@ export default function OnlineGamePage() {
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-4">
           {/* メインゲームエリア */}
           <div className="lg:col-span-3">
-            {/* 問題表示 */}
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
-              <h2 className="text-lg font-semibold mb-4 text-center">以下の数字を使って10を作ろう！</h2>
-              <div className="flex justify-center space-x-4 mb-6">
-                {myNumbers.length > 0 ? myNumbers.map((number, index) => (
-                  <div key={index} className="text-4xl font-bold text-blue-600 bg-blue-100 dark:bg-blue-900 rounded-lg p-4 min-w-[80px] text-center">
-                    {number}
-                  </div>
-                )) : [1, 2, 3, 4].map((number, index) => (
-                  <div key={index} className="text-4xl font-bold text-gray-400 bg-gray-100 dark:bg-gray-700 rounded-lg p-4 min-w-[80px] text-center">
-                    ?
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* 入力エリア */}
-            <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
-              <div className="mb-4">
-                <div className="bg-gray-100 dark:bg-gray-700 rounded-lg p-4 text-5xl font-mono min-h-[80px] flex items-center">
-                  {formula || ''}
-                </div>
-                
-                {/* メッセージ表示エリア（常に表示・固定サイズ） */}
-                <div className="mt-3 h-14 flex items-center">
-                  {errorMessage ? (
-                    <div className={`w-full h-full border rounded-lg p-3 flex items-center ${
-                      (errorMessage.includes('正解！') || errorMessage.includes('+10pt')) && !errorMessage.includes('不正解')
-                        ? 'bg-green-100 border-green-300 text-green-700'
-                        : errorMessage.includes('スキップ') || errorMessage.includes('-3pt')
-                        ? 'bg-yellow-100 border-yellow-300 text-yellow-700'
-                        : 'bg-red-100 border-red-300 text-red-700'
-                    }`}>
-                      <span className="text-lg mr-2 flex-shrink-0">
-                        {(errorMessage.includes('正解！') || errorMessage.includes('+10pt')) && !errorMessage.includes('不正解') ? '✅' : 
-                         errorMessage.includes('スキップ') || errorMessage.includes('-3pt') ? '⏭️' : '❌'}
-                      </span>
-                      <span className="overflow-hidden text-ellipsis whitespace-nowrap">{errorMessage}</span>
-                    </div>
-                  ) : (
-                    <div className="w-full h-full bg-gray-50 border border-gray-200 text-gray-400 rounded-lg p-3 flex items-center"></div>
+            {/* 待機中またはカウントダウン中の表示 */}
+            {(waitingCountdown !== null || startCountdown !== null || (!gameState?.isActive && players.length < 2)) && (
+              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
+                <div className="text-center py-16">
+                  {waitingCountdown !== null && (
+                    <>
+                      <div className="text-4xl mb-4">⏳</div>
+                      <h2 className="text-2xl font-semibold mb-4">ゲーム開始まで</h2>
+                      <div className="text-6xl font-bold text-yellow-600 mb-4">{waitingCountdown}</div>
+                      <p className="text-gray-600">プレイヤーが揃いました！ゲームが自動で開始されます</p>
+                    </>
+                  )}
+                  {startCountdown !== null && (
+                    <>
+                      <div className="text-4xl mb-4">🎮</div>
+                      <h2 className="text-2xl font-semibold mb-4">開始カウントダウン</h2>
+                      <div className="text-8xl font-bold text-red-600 mb-4 animate-pulse">{startCountdown}</div>
+                      <p className="text-gray-600">準備はいいですか？</p>
+                    </>
+                  )}
+                  {!gameState?.isActive && players.length < 2 && !waitingCountdown && !startCountdown && (
+                    <>
+                      <div className="text-4xl mb-4">👥</div>
+                      <h2 className="text-2xl font-semibold mb-4">プレイヤーを待機中</h2>
+                      <p className="text-gray-600">他のプレイヤーの参加をお待ちください</p>
+                      <div className="mt-4 text-lg text-blue-600">
+                        現在のプレイヤー数: {players.length}
+                      </div>
+                      <div className="mt-2 text-sm text-gray-500">
+                        2人で自動開始、4人で即座に開始
+                      </div>
+                    </>
                   )}
                 </div>
               </div>
+            )}
+
+            {/* ゲーム中の問題表示 */}
+            {gameState?.isActive && (
+              <>
+                {/* 問題表示 */}
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
+                  <h2 className="text-lg font-semibold mb-4 text-center">以下の数字を使って10を作ろう！</h2>
+                  <div className="flex justify-center space-x-4 mb-6">
+                    {myNumbers.length > 0 ? myNumbers.map((number, index) => (
+                      <div key={index} className="text-4xl font-bold text-blue-600 bg-blue-100 dark:bg-blue-900 rounded-lg p-4 min-w-[80px] text-center">
+                        {number}
+                      </div>
+                    )) : [1, 2, 3, 4].map((number, index) => (
+                      <div key={index} className="text-4xl font-bold text-gray-400 bg-gray-100 dark:bg-gray-700 rounded-lg p-4 min-w-[80px] text-center">
+                        ?
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* 入力エリア */}
+                <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-4">
+                  <div className="mb-4">
+                    <div className="bg-gray-100 dark:bg-gray-700 rounded-lg p-4 text-5xl font-mono min-h-[80px] flex items-center">
+                      {formula || ''}
+                    </div>
+                    
+                    {/* メッセージ表示エリア（常に表示・固定サイズ） */}
+                    <div className="mt-3 h-14 flex items-center">
+                      {errorMessage ? (
+                        <div className={`w-full h-full border rounded-lg p-3 flex items-center ${
+                          (errorMessage.includes('正解！') || errorMessage.includes('+10pt')) && !errorMessage.includes('不正解')
+                            ? 'bg-green-100 border-green-300 text-green-700'
+                            : errorMessage.includes('スキップ') || errorMessage.includes('-3pt')
+                            ? 'bg-yellow-100 border-yellow-300 text-yellow-700'
+                            : 'bg-red-100 border-red-300 text-red-700'
+                        }`}>
+                          <span className="text-lg mr-2 flex-shrink-0">
+                            {(errorMessage.includes('正解！') || errorMessage.includes('+10pt')) && !errorMessage.includes('不正解') ? '✅' : 
+                             errorMessage.includes('スキップ') || errorMessage.includes('-3pt') ? '⏭️' : '❌'}
+                          </span>
+                          <span className="overflow-hidden text-ellipsis whitespace-nowrap">{errorMessage}</span>
+                        </div>
+                      ) : (
+                        <div className="w-full h-full bg-gray-50 border border-gray-200 text-gray-400 rounded-lg p-3 flex items-center"></div>
+                      )}
+                    </div>
+                  </div>
 
               {/* ボタン群 */}
               <div className="space-y-4">
@@ -631,6 +730,8 @@ export default function OnlineGamePage() {
                 </div>
               </div>
             </div>
+              </>
+            )}
           </div>
 
           {/* 右側：プレイヤー状況 */}
