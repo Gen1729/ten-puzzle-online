@@ -1,6 +1,7 @@
 const { createServer } = require('http');
-const { Server } = require('socket.io');
+const WebSocket = require('ws');
 const next = require('next');
+const { v4: uuidv4 } = require('uuid');
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -161,74 +162,218 @@ interface GameRoom {
 app.prepare().then(() => {
   const httpServer = createServer(handler);
   
-  const io = new Server(httpServer, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
-    }
+  // WebSocketサーバーの初期化
+  const wss = new WebSocket.Server({ 
+    server: httpServer,
+    path: '/ws'
   });
 
   // ゲームルーム管理
   const gameRooms = new Map();
+  const clients = new Map(); // WebSocket接続の管理
 
-  io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
+  // WebSocket接続処理
+  wss.on('connection', (ws) => {
+    const clientId = uuidv4();
+    clients.set(clientId, { ws, rooms: new Set() });
+    
+    console.log('WebSocket client connected:', clientId);
 
-    // ルーム参加
-    socket.on('join-room', (roomId, playerName) => {
-      socket.join(roomId);
-      
-      if (!gameRooms.has(roomId)) {
-        gameRooms.set(roomId, {
-          players: [],
-          gameState: {
-            timeLeft: 180,
-            isActive: false
-          },
-          problemSequence: generateProblemSequence(), // 共通の問題シーケンス
-          currentProblemIndex: 0, // 現在の問題インデックス
-          waitingCountdown: null, // 30秒待機カウントダウン
-          startCountdown: null, // 3秒開始カウントダウン
-          waitingTimer: null // 待機タイマーの参照
-        });
+    // メッセージハンドラー
+    ws.on('message', (message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        handleMessage(clientId, data);
+      } catch (error) {
+        console.error('Invalid message format:', error);
+        sendToClient(clientId, { type: 'error', message: 'Invalid message format' });
       }
+    });
 
-      const room = gameRooms.get(roomId);
-      const existingPlayer = room.players.find(p => p.socketId === socket.id);
-      
-      if (!existingPlayer) {
-        // 新しいプレイヤーは現在の問題から開始
-        const currentProblem = room.problemSequence[room.currentProblemIndex];
-        room.players.push({
-          socketId: socket.id,
-          name: playerName,
-          score: 0,
-          correct: 0,
-          wrong: 0,
-          skip: 0,
-          currentNumbers: currentProblem.numbers, // 全員同じ問題
-          problemIndex: room.currentProblemIndex // プレイヤーの現在の問題インデックス
-        });
+    // 切断処理
+    ws.on('close', () => {
+      console.log('WebSocket client disconnected:', clientId);
+      handleDisconnect(clientId);
+      clients.delete(clientId);
+    });
+
+    // 接続確認メッセージ
+    sendToClient(clientId, { type: 'connected', clientId });
+  });
+
+  // メッセージ処理関数
+  function handleMessage(clientId, data) {
+    const { type, payload } = data;
+
+    switch (type) {
+      case 'join-room':
+        handleJoinRoom(clientId, payload);
+        break;
+      case 'submit-answer':
+        handleSubmitAnswer(clientId, payload);
+        break;
+      case 'skip-problem':
+        handleSkipProblem(clientId, payload);
+        break;
+      case 'start-game':
+        handleStartGame(clientId, payload);
+        break;
+      default:
+        sendToClient(clientId, { type: 'error', message: 'Unknown message type' });
+    }
+  }
+
+  // クライアントにメッセージ送信
+  function sendToClient(clientId, message) {
+    const client = clients.get(clientId);
+    if (client && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(JSON.stringify(message));
+    }
+  }
+
+  // ルーム内全員にメッセージ送信
+  function broadcastToRoom(roomId, message, excludeClientId = null) {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    room.players.forEach(player => {
+      if (player.clientId !== excludeClientId) {
+        sendToClient(player.clientId, message);
       }
+    });
+  }
 
-      socket.emit('room-joined', {
+  // ルーム参加処理
+  function handleJoinRoom(clientId, payload) {
+    const { roomId, playerName } = payload;
+    const client = clients.get(clientId);
+    if (!client) return;
+
+    // ルームに参加
+    client.rooms.add(roomId);
+
+    if (!gameRooms.has(roomId)) {
+      gameRooms.set(roomId, {
+        players: [],
+        gameState: {
+          timeLeft: 180,
+          isActive: false
+        },
+        problemSequence: generateProblemSequence(),
+        currentProblemIndex: 0,
+        waitingCountdown: null,
+        startCountdown: null,
+        waitingTimer: null
+      });
+    }
+
+    const room = gameRooms.get(roomId);
+    const existingPlayer = room.players.find(p => p.clientId === clientId);
+    
+    if (!existingPlayer) {
+      const currentProblem = room.problemSequence[room.currentProblemIndex];
+      room.players.push({
+        clientId,
+        name: playerName,
+        score: 0,
+        correct: 0,
+        wrong: 0,
+        skip: 0,
+        currentNumbers: currentProblem.numbers,
+        problemIndex: room.currentProblemIndex
+      });
+    }
+
+    // ルーム参加成功を通知
+    sendToClient(clientId, {
+      type: 'room-joined',
+      payload: {
         roomId,
         players: room.players,
         gameState: room.gameState
+      }
+    });
+
+    // 他のプレイヤーに参加を通知
+    broadcastToRoom(roomId, {
+      type: 'player-joined',
+      payload: { players: room.players }
+    }, clientId);
+
+    console.log(`Player ${playerName} joined room ${roomId}. Total players: ${room.players.length}`);
+
+    // 自動ゲーム開始ロジック
+    checkAutoStart(roomId);
+  }
+
+  // 自動ゲーム開始チェック
+  function checkAutoStart(roomId) {
+    const room = gameRooms.get(roomId);
+    if (!room || room.gameState.isActive) return;
+
+    // 4人になったら即座に3秒カウントダウン
+    if (room.players.length === 4) {
+      if (room.waitingTimer) {
+        clearInterval(room.waitingTimer);
+        room.waitingTimer = null;
+      }
+      room.waitingCountdown = null;
+      
+      console.log(`4 players joined! Starting immediate 3-second countdown for room ${roomId}`);
+      startCountdown(roomId, 3);
+    }
+    // 2人になったら30秒待機
+    else if (room.players.length === 2 && !room.waitingCountdown && !room.startCountdown) {
+      console.log(`Starting 30-second waiting countdown for room ${roomId}`);
+      room.waitingCountdown = 30;
+      
+      broadcastToRoom(roomId, {
+        type: 'waiting-countdown-start',
+        payload: { countdown: 30 }
       });
-
-      socket.to(roomId).emit('player-joined', {
-        players: room.players
-      });
-
-      console.log(`Player ${playerName} joined room ${roomId}. Total players: ${room.players.length}`);
-
-      // 4人になったら即座に3秒カウントダウンを開始
-      if (room.players.length === 4 && !room.gameState.isActive) {
-        // 既存の待機カウントダウンがあればキャンセル
-        if (room.waitingTimer) {
+      
+      room.waitingTimer = setInterval(() => {
+        room.waitingCountdown -= 1;
+        broadcastToRoom(roomId, {
+          type: 'waiting-countdown-update',
+          payload: { countdown: room.waitingCountdown }
+        });
+        
+        if (room.waitingCountdown <= 0) {
           clearInterval(room.waitingTimer);
           room.waitingTimer = null;
+          room.waitingCountdown = null;
+          startCountdown(roomId, 3);
+        }
+      }, 1000);
+    }
+  }
+
+  // カウントダウン開始
+  function startCountdown(roomId, seconds) {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    room.startCountdown = seconds;
+    broadcastToRoom(roomId, {
+      type: 'start-countdown-begin',
+      payload: { countdown: seconds }
+    });
+    
+    const startTimer = setInterval(() => {
+      room.startCountdown -= 1;
+      broadcastToRoom(roomId, {
+        type: 'start-countdown-update',
+        payload: { countdown: room.startCountdown }
+      });
+      
+      if (room.startCountdown <= 0) {
+        clearInterval(startTimer);
+        room.startCountdown = null;
+        startGameForRoom(roomId);
+      }
+    }, 1000);
+  }
         }
         room.waitingCountdown = null;
         
