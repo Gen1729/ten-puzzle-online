@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useSocket } from '../../contexts/SocketContext-ws';
+import { useSocket } from '../../contexts/SocketContext';
 import { ArithmeticParser } from '../parser/parser';
 import { v4 as uuidv4 } from 'uuid';
 import { useRouter } from 'next/navigation';

@@ -1,11 +1,10 @@
 'use client';
 
-import { createContext, useContext, useEffect, useState, ReactNode } from 'react';
-import { io, Socket } from 'socket.io-client';
+import { createContext, useContext, useEffect, useState, ReactNode, useRef, useCallback } from 'react';
 import { Player, GameState } from '../types/game';
 
 interface SocketContextType {
-  socket: Socket | null;
+  ws: WebSocket | null;
   isConnected: boolean;
   joinRoom: (roomId: string, playerName: string) => void;
   submitAnswer: (roomId: string, formula: string) => void;
@@ -15,6 +14,8 @@ interface SocketContextType {
   gameState: GameState | null;
   roomId: string | null;
   myNumbers: number[];
+  waitingCountdown: number | null;
+  startCountdown: number | null;
 }
 
 const SocketContext = createContext<SocketContextType | undefined>(undefined);
@@ -32,127 +33,232 @@ interface SocketProviderProps {
 }
 
 export const SocketProvider = ({ children }: SocketProviderProps) => {
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [ws, setWs] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [players, setPlayers] = useState<Player[]>([]);
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [myNumbers, setMyNumbers] = useState<number[]>([]);
+  const [waitingCountdown, setWaitingCountdown] = useState<number | null>(null);
+  const [startCountdown, setStartCountdown] = useState<number | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
-  useEffect(() => {
-    const socketIo = io({
-      path: '/socket.io',
-      transports: ['websocket', 'polling']
-    });
+  const sendMessage = useCallback((message: Record<string, unknown>) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(message));
+    }
+  }, [ws]);
 
-    socketIo.on('connect', () => {
-      console.log('Connected to server');
+  const connect = useCallback(() => {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.host}/ws`;
+    
+    const newWs = new WebSocket(wsUrl);
+    
+    newWs.onopen = () => {
+      console.log('WebSocket connected');
       setIsConnected(true);
-    });
-
-    socketIo.on('disconnect', () => {
-      console.log('Disconnected from server');
-      setIsConnected(false);
-    });
-
-    // ルーム参加成功
-    socketIo.on('room-joined', (data) => {
-      console.log('Room joined:', data);
-      setRoomId(data.roomId);
-      setPlayers(data.players);
-      setGameState(data.gameState);
-      
-      // 自分の数字を設定
-      const myPlayer = data.players.find((p: Player) => p.socketId === socketIo.id);
-      if (myPlayer && myPlayer.currentNumbers) {
-        setMyNumbers(myPlayer.currentNumbers);
-      }
-    });
-
-    // プレイヤー参加通知
-    socketIo.on('player-joined', (data) => {
-      setPlayers(data.players);
-    });
-
-    // プレイヤー退出通知
-    socketIo.on('player-left', (data) => {
-      console.log(`${data.playerName} left the game`);
-      setPlayers(data.players);
-    });
-
-    // プレイヤーリスト更新
-    socketIo.on('players-updated', (players) => {
-      setPlayers(players);
-    });
-
-    // 回答結果
-    socketIo.on('answer-result', (data) => {
-      console.log('Answer result:', data);
-      if (data.newNumbers) {
-        setMyNumbers(data.newNumbers);
-      }
-    });
-
-    // スキップ結果
-    socketIo.on('skip-result', (data) => {
-      console.log('Skip result:', data);
-      if (data.newNumbers) {
-        setMyNumbers(data.newNumbers);
-      }
-      // スキップメッセージは各ページで個別に処理する
-    });
-
-    // ゲーム開始
-    socketIo.on('game-started', (data) => {
-      console.log('Game started:', data);
-      setGameState(data.gameState);
-    });
-
-    // タイマー更新
-    socketIo.on('time-update', (timeLeft) => {
-      setGameState(prev => prev ? { ...prev, timeLeft } : null);
-    });
-
-    // ゲーム終了
-    socketIo.on('game-ended', (data) => {
-      console.log('Game ended:', data);
-      setPlayers(data.players);
-      setGameState(prev => prev ? { ...prev, isActive: false } : null);
-    });
-
-    setSocket(socketIo);
-
-    return () => {
-      socketIo.disconnect();
     };
+    
+    newWs.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleMessage(data);
+      } catch (error) {
+        console.error('Failed to parse message:', error);
+      }
+    };
+    
+    newWs.onclose = () => {
+      console.log('WebSocket disconnected');
+      setIsConnected(false);
+      setWs(null);
+      
+      // 自動再接続
+      reconnectTimeoutRef.current = setTimeout(() => {
+        connect();
+      }, 3000);
+    };
+    
+    newWs.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+    
+    setWs(newWs);
   }, []);
 
-  const joinRoom = (roomId: string, playerName: string) => {
-    if (socket) {
-      socket.emit('join-room', roomId, playerName);
+  const handleMessage = useCallback((data: Record<string, unknown>) => {
+    const { type, payload } = data;
+    
+    switch (type) {
+      case 'connected':
+        console.log('Connected with client ID:', (payload as { clientId?: string })?.clientId);
+        break;
+        
+      case 'room-joined':
+        {
+          const p = payload as { roomId: string; players: Player[]; gameState: GameState };
+          setRoomId(p.roomId);
+          setPlayers(p.players);
+          setGameState(p.gameState);
+          // 自分の現在の数字を設定
+          const myPlayer = p.players.find((player: Player) => player.name === localStorage.getItem('playerName'));
+          if (myPlayer && myPlayer.currentNumbers) {
+            setMyNumbers(myPlayer.currentNumbers);
+          }
+        }
+        break;
+        
+      case 'player-joined':
+        {
+          const p = payload as { players: Player[] };
+          setPlayers(p.players);
+        }
+        break;
+        
+      case 'player-left':
+        {
+          const p = payload as { players: Player[] };
+          setPlayers(p.players);
+        }
+        break;
+        
+      case 'players-updated':
+        {
+          const p = payload as { players: Player[] };
+          setPlayers(p.players);
+        }
+        break;
+        
+      case 'waiting-countdown-start':
+        {
+          const p = payload as { countdown: number };
+          setWaitingCountdown(p.countdown);
+          console.log('Waiting countdown started:', p.countdown);
+        }
+        break;
+        
+      case 'waiting-countdown-update':
+        {
+          const p = payload as { countdown: number };
+          setWaitingCountdown(p.countdown);
+          console.log('Waiting countdown:', p.countdown);
+        }
+        break;
+        
+      case 'start-countdown-begin':
+        {
+          const p = payload as { countdown: number };
+          setWaitingCountdown(null);
+          setStartCountdown(p.countdown);
+          console.log('Start countdown begin:', p.countdown);
+        }
+        break;
+        
+      case 'start-countdown-update':
+        {
+          const p = payload as { countdown: number };
+          setStartCountdown(p.countdown);
+          console.log('Start countdown:', p.countdown);
+        }
+        break;
+        
+      case 'game-started':
+        {
+          const p = payload as { gameState: GameState };
+          setWaitingCountdown(null);
+          setStartCountdown(null);
+          setGameState(p.gameState);
+        }
+        break;
+        
+      case 'time-update':
+        {
+          const p = payload as { timeLeft: number };
+          setGameState(prev => prev ? { ...prev, timeLeft: p.timeLeft } : null);
+        }
+        break;
+        
+      case 'game-ended':
+        setGameState(prev => prev ? { ...prev, isActive: false } : null);
+        console.log('Game ended:', payload);
+        break;
+        
+      case 'answer-result':
+        {
+          const p = payload as { success: boolean; isCorrect?: boolean; newNumbers?: number[]; message: string };
+          if (p.success && p.isCorrect && p.newNumbers) {
+            setMyNumbers(p.newNumbers);
+          }
+          console.log('Answer result:', p.message);
+        }
+        break;
+        
+      case 'skip-result':
+        {
+          const p = payload as { newNumbers?: number[]; message: string };
+          if (p.newNumbers) {
+            setMyNumbers(p.newNumbers);
+          }
+          console.log('Skip result:', p.message);
+        }
+        break;
+        
+      case 'error':
+        {
+          const p = payload as { message?: string };
+          console.error('Server error:', p.message || 'Unknown error');
+        }
+        break;
+        
+      default:
+        console.log('Unknown message type:', type);
     }
-  };
+  }, []);
 
-  const submitAnswer = (roomId: string, formula: string) => {
-    if (socket) {
-      socket.emit('submit-answer', roomId, formula);
+  useEffect(() => {
+    if (!ws) {
+      connect();
     }
-  };
+    
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+    };
+  }, [connect, ws]);
 
-  const skipProblem = (roomId: string) => {
-    if (socket) {
-      socket.emit('skip-problem', roomId);
-    }
-  };
+  const joinRoom = useCallback((roomId: string, playerName: string) => {
+    localStorage.setItem('playerName', playerName);
+    sendMessage({
+      type: 'join-room',
+      payload: { roomId, playerName }
+    });
+  }, [sendMessage]);
 
-  const startGame = (roomId: string) => {
-    if (socket) {
-      socket.emit('start-game', roomId);
-    }
-  };
+  const submitAnswer = useCallback((roomId: string, formula: string) => {
+    sendMessage({
+      type: 'submit-answer',
+      payload: { roomId, formula }
+    });
+  }, [sendMessage]);
+
+  const skipProblem = useCallback((roomId: string) => {
+    sendMessage({
+      type: 'skip-problem',
+      payload: { roomId }
+    });
+  }, [sendMessage]);
+
+  const startGame = useCallback((roomId: string) => {
+    sendMessage({
+      type: 'start-game',
+      payload: { roomId }
+    });
+  }, [sendMessage]);
 
   const value: SocketContextType = {
-    socket,
+    ws,
     isConnected,
     joinRoom,
     submitAnswer,
@@ -161,7 +267,9 @@ export const SocketProvider = ({ children }: SocketProviderProps) => {
     players,
     gameState,
     roomId,
-    myNumbers
+    myNumbers,
+    waitingCountdown,
+    startCountdown
   };
 
   return (

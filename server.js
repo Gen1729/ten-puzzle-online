@@ -1,7 +1,7 @@
-const { createServer } = require('http');
-const WebSocket = require('ws');
-const next = require('next');
-const { v4: uuidv4 } = require('uuid');
+import { createServer } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import next from 'next';
+import { v4 as uuidv4 } from 'uuid';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = 'localhost';
@@ -10,7 +10,7 @@ const port = process.env.PORT || 3000;
 const app = next({ dev, hostname, port });
 const handler = app.getRequestHandler();
 
-// 問題データファイルを直接読み込み
+// 問題データ
 const easyProblems = [
   '1124', '1223', '1478', '2468', '0446', '1118', '1355', '2466',
   '1258', '2378', '0255', '1268', '2888', '3337', '3777', '4666',
@@ -90,12 +90,12 @@ const difficultProblems = [
   '3789', '4555', '4579', '5567'
 ];
 
-// 問題文字列を数字配列に変換する関数
+// 問題文字列を数字配列に変換
 const convertProblemToNumbers = (problemStr) => {
   return problemStr.split('').map(char => parseInt(char));
 };
 
-// ゲーム用の問題シーケンスを生成する関数（各難易度から均等に選択）
+// 問題シーケンス生成
 const generateProblemSequence = (count = 90) => {
   const sequence = [];
   const difficulties = [
@@ -104,7 +104,6 @@ const generateProblemSequence = (count = 90) => {
     { name: 'difficult', problems: [...difficultProblems], usedProblems: new Set() }
   ];
   
-  // 各難易度のインデックス
   let difficultyIndex = 0;
   
   while (sequence.length < count) {
@@ -114,7 +113,6 @@ const generateProblemSequence = (count = 90) => {
     );
     
     if (availableProblems.length > 0) {
-      // その難易度から問題をランダム選択
       const randomIndex = Math.floor(Math.random() * availableProblems.length);
       const selectedProblem = availableProblems[randomIndex];
       
@@ -125,52 +123,71 @@ const generateProblemSequence = (count = 90) => {
         originalProblem: selectedProblem
       });
     } else {
-      // その難易度の問題が尽きた場合、使用済みをリセット
       currentDifficulty.usedProblems.clear();
     }
     
-    // 次の難易度に移る（easy -> normal -> difficult -> easy の循環）
     difficultyIndex = (difficultyIndex + 1) % difficulties.length;
   }
   
   return sequence;
 };
 
-// 型定義（JavaScript版なのでコメントで記載）
-/*
-interface Player {
-  socketId: string;
-  name: string;
-  score: number;
-  correct: number;
-  wrong: number;
-  skip: number;
+// 数式評価
+function evaluateFormula(formula) {
+  const normalizedFormula = formula.replace(/×/g, '*').replace(/÷/g, '/');
+  
+  if (!/^[0-9+\-*/().\s]+$/.test(normalizedFormula)) {
+    throw new Error('不正な文字が含まれています');
+  }
+  
+  try {
+    const result = Function('"use strict"; return (' + normalizedFormula + ')')();
+    return result;
+  } catch {
+    throw new Error('数式の評価に失敗しました');
+  }
 }
 
-interface GameState {
-  currentNumbers: number[];
-  timeLeft: number;
-  isActive: boolean;
-}
+// 数字使用チェック
+function validateNumbersUsage(formula, allowedNumbers) {
+  const numbersInFormula = formula.match(/\d+/g);
+  if (!numbersInFormula) return true;
 
-interface GameRoom {
-  players: Player[];
-  gameState: GameState;
+  const usedNumbers = numbersInFormula.map(Number);
+  const availableNumbers = [...allowedNumbers];
+
+  for (const num of usedNumbers) {
+    const index = availableNumbers.indexOf(num);
+    if (index === -1) {
+      return false;
+    }
+    availableNumbers.splice(index, 1);
+  }
+
+  return true;
 }
-*/
 
 app.prepare().then(() => {
-  const httpServer = createServer(handler);
+  const httpServer = createServer((req, res) => {
+    // WebSocket以外のリクエストはNext.jsに渡す
+    if (req.url.startsWith('/ws')) {
+      // WebSocketハンドシェイクはWebSocketサーバーが処理
+      return;
+    }
+    return handler(req, res);
+  });
   
   // WebSocketサーバーの初期化
-  const wss = new WebSocket.Server({ 
+  const wss = new WebSocketServer({ 
     server: httpServer,
     path: '/ws'
   });
 
-  // ゲームルーム管理
+  // ゲーム状態管理
   const gameRooms = new Map();
-  const clients = new Map(); // WebSocket接続の管理
+  const clients = new Map();
+
+  console.log('WebSocket server initialized on /ws');
 
   // WebSocket接続処理
   wss.on('connection', (ws) => {
@@ -179,7 +196,10 @@ app.prepare().then(() => {
     
     console.log('WebSocket client connected:', clientId);
 
-    // メッセージハンドラー
+    // 接続確認
+    sendToClient(clientId, { type: 'connected', clientId });
+
+    // メッセージ処理
     ws.on('message', (message) => {
       try {
         const data = JSON.parse(message.toString());
@@ -194,14 +214,29 @@ app.prepare().then(() => {
     ws.on('close', () => {
       console.log('WebSocket client disconnected:', clientId);
       handleDisconnect(clientId);
-      clients.delete(clientId);
     });
-
-    // 接続確認メッセージ
-    sendToClient(clientId, { type: 'connected', clientId });
   });
 
-  // メッセージ処理関数
+  // ユーティリティ関数
+  function sendToClient(clientId, message) {
+    const client = clients.get(clientId);
+    if (client && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(JSON.stringify(message));
+    }
+  }
+
+  function broadcastToRoom(roomId, message, excludeClientId = null) {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    room.players.forEach(player => {
+      if (player.clientId !== excludeClientId) {
+        sendToClient(player.clientId, message);
+      }
+    });
+  }
+
+  // メッセージハンドラー
   function handleMessage(clientId, data) {
     const { type, payload } = data;
 
@@ -223,42 +258,18 @@ app.prepare().then(() => {
     }
   }
 
-  // クライアントにメッセージ送信
-  function sendToClient(clientId, message) {
-    const client = clients.get(clientId);
-    if (client && client.ws.readyState === WebSocket.OPEN) {
-      client.ws.send(JSON.stringify(message));
-    }
-  }
-
-  // ルーム内全員にメッセージ送信
-  function broadcastToRoom(roomId, message, excludeClientId = null) {
-    const room = gameRooms.get(roomId);
-    if (!room) return;
-
-    room.players.forEach(player => {
-      if (player.clientId !== excludeClientId) {
-        sendToClient(player.clientId, message);
-      }
-    });
-  }
-
-  // ルーム参加処理
+  // ルーム参加
   function handleJoinRoom(clientId, payload) {
     const { roomId, playerName } = payload;
     const client = clients.get(clientId);
     if (!client) return;
 
-    // ルームに参加
     client.rooms.add(roomId);
 
     if (!gameRooms.has(roomId)) {
       gameRooms.set(roomId, {
         players: [],
-        gameState: {
-          timeLeft: 180,
-          isActive: false
-        },
+        gameState: { timeLeft: 180, isActive: false },
         problemSequence: generateProblemSequence(),
         currentProblemIndex: 0,
         waitingCountdown: null,
@@ -284,49 +295,152 @@ app.prepare().then(() => {
       });
     }
 
-    // ルーム参加成功を通知
     sendToClient(clientId, {
       type: 'room-joined',
-      payload: {
-        roomId,
-        players: room.players,
-        gameState: room.gameState
-      }
+      payload: { roomId, players: room.players, gameState: room.gameState }
     });
 
-    // 他のプレイヤーに参加を通知
     broadcastToRoom(roomId, {
       type: 'player-joined',
       payload: { players: room.players }
     }, clientId);
 
-    console.log(`Player ${playerName} joined room ${roomId}. Total players: ${room.players.length}`);
-
-    // 自動ゲーム開始ロジック
+    // 自動開始チェック
     checkAutoStart(roomId);
   }
 
-  // 自動ゲーム開始チェック
+  // 答え提出
+  function handleSubmitAnswer(clientId, payload) {
+    const { roomId, formula } = payload;
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    const player = room.players.find(p => p.clientId === clientId);
+    if (!player) return;
+
+    try {
+      const isValidNumbers = validateNumbersUsage(formula, player.currentNumbers);
+      if (!isValidNumbers) {
+        sendToClient(clientId, {
+          type: 'answer-result',
+          payload: { success: false, message: '指定された数字のみを使用してください' }
+        });
+        return;
+      }
+
+      const result = evaluateFormula(formula);
+      const isCorrect = Math.abs(result - 10) < 1e-10;
+      
+      if (isCorrect) {
+        player.score += 10;
+        player.correct += 1;
+        advancePlayer(player, room);
+        
+        sendToClient(clientId, {
+          type: 'answer-result',
+          payload: {
+            success: true,
+            isCorrect: true,
+            message: '正解！',
+            newNumbers: player.currentNumbers
+          }
+        });
+      } else {
+        player.wrong += 1;
+        sendToClient(clientId, {
+          type: 'answer-result',
+          payload: {
+            success: true,
+            isCorrect: false,
+            message: `不正解... ${formula} = ${result}`
+          }
+        });
+      }
+
+      broadcastToRoom(roomId, {
+        type: 'players-updated',
+        payload: { players: room.players }
+      });
+
+    } catch {
+      sendToClient(clientId, {
+        type: 'answer-result',
+        payload: { success: false, message: '数式が正しくありません' }
+      });
+    }
+  }
+
+  // スキップ
+  function handleSkipProblem(clientId, payload) {
+    const { roomId } = payload;
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    const player = room.players.find(p => p.clientId === clientId);
+    if (!player) return;
+
+    player.skip += 1;
+    player.score = Math.max(0, player.score - 3);
+    advancePlayer(player, room);
+
+    sendToClient(clientId, {
+      type: 'skip-result',
+      payload: {
+        newNumbers: player.currentNumbers,
+        message: 'スキップしました（-3pt）'
+      }
+    });
+
+    broadcastToRoom(roomId, {
+      type: 'players-updated',
+      payload: { players: room.players }
+    });
+  }
+
+  // プレイヤーを次の問題に進める
+  function advancePlayer(player, room) {
+    player.problemIndex += 1;
+    if (player.problemIndex < room.problemSequence.length) {
+      const nextProblem = room.problemSequence[player.problemIndex];
+      player.currentNumbers = nextProblem.numbers;
+    } else {
+      player.problemIndex = 0;
+      const firstProblem = room.problemSequence[0];
+      player.currentNumbers = firstProblem.numbers;
+    }
+  }
+
+  // ゲーム開始
+  function handleStartGame(clientId, payload) {
+    const { roomId } = payload;
+    const room = gameRooms.get(roomId);
+    if (!room || room.gameState.isActive) return;
+
+    // カウントダウンをキャンセル
+    if (room.waitingTimer) {
+      clearInterval(room.waitingTimer);
+      room.waitingTimer = null;
+    }
+    room.waitingCountdown = null;
+    room.startCountdown = null;
+    
+    startGameForRoom(roomId);
+  }
+
+  // 自動開始チェック
   function checkAutoStart(roomId) {
     const room = gameRooms.get(roomId);
     if (!room || room.gameState.isActive) return;
 
-    // 4人になったら即座に3秒カウントダウン
     if (room.players.length === 4) {
       if (room.waitingTimer) {
         clearInterval(room.waitingTimer);
         room.waitingTimer = null;
       }
       room.waitingCountdown = null;
-      
-      console.log(`4 players joined! Starting immediate 3-second countdown for room ${roomId}`);
       startCountdown(roomId, 3);
-    }
-    // 2人になったら30秒待機
-    else if (room.players.length === 2 && !room.waitingCountdown && !room.startCountdown) {
-      console.log(`Starting 30-second waiting countdown for room ${roomId}`);
+    } else if (room.players.length === 2 && !room.waitingCountdown) {
       room.waitingCountdown = 30;
-      
       broadcastToRoom(roomId, {
         type: 'waiting-countdown-start',
         payload: { countdown: 30 }
@@ -349,7 +463,7 @@ app.prepare().then(() => {
     }
   }
 
-  // カウントダウン開始
+  // カウントダウン
   function startCountdown(roomId, seconds) {
     const room = gameRooms.get(roomId);
     if (!room) return;
@@ -360,7 +474,7 @@ app.prepare().then(() => {
       payload: { countdown: seconds }
     });
     
-    const startTimer = setInterval(() => {
+    const timer = setInterval(() => {
       room.startCountdown -= 1;
       broadcastToRoom(roomId, {
         type: 'start-countdown-update',
@@ -368,344 +482,92 @@ app.prepare().then(() => {
       });
       
       if (room.startCountdown <= 0) {
-        clearInterval(startTimer);
+        clearInterval(timer);
         room.startCountdown = null;
         startGameForRoom(roomId);
       }
     }, 1000);
   }
-        }
-        room.waitingCountdown = null;
-        
-        console.log(`4 players joined! Starting immediate 3-second countdown for room ${roomId}`);
-        room.startCountdown = 3;
-        io.to(roomId).emit('start-countdown-begin', { countdown: 3 });
-        
-        const startTimer = setInterval(() => {
-          room.startCountdown -= 1;
-          io.to(roomId).emit('start-countdown-update', { countdown: room.startCountdown });
-          
-          if (room.startCountdown <= 0) {
-            clearInterval(startTimer);
-            room.startCountdown = null;
-            
-            // ゲーム自動開始
-            startGameForRoom(roomId, room, io);
-          }
-        }, 1000);
-      }
-      // 2人になったら30秒の待機カウントダウンを開始（4人未満の場合のみ）
-      else if (room.players.length === 2 && !room.gameState.isActive && !room.waitingCountdown && !room.startCountdown) {
-        console.log(`Starting 30-second waiting countdown for room ${roomId}`);
-        room.waitingCountdown = 30;
-        
-        io.to(roomId).emit('waiting-countdown-start', { countdown: 30 });
-        
-        room.waitingTimer = setInterval(() => {
-          room.waitingCountdown -= 1;
-          io.to(roomId).emit('waiting-countdown-update', { countdown: room.waitingCountdown });
-          
-          if (room.waitingCountdown <= 0) {
-            clearInterval(room.waitingTimer);
-            room.waitingTimer = null;
-            room.waitingCountdown = null;
-            
-            // 3秒の開始カウントダウンを開始
-            console.log(`Starting 3-second start countdown for room ${roomId}`);
-            room.startCountdown = 3;
-            io.to(roomId).emit('start-countdown-begin', { countdown: 3 });
-            
-            const startTimer = setInterval(() => {
-              room.startCountdown -= 1;
-              io.to(roomId).emit('start-countdown-update', { countdown: room.startCountdown });
-              
-              if (room.startCountdown <= 0) {
-                clearInterval(startTimer);
-                room.startCountdown = null;
-                
-                // ゲーム自動開始
-                startGameForRoom(roomId, room, io);
-              }
-            }, 1000);
-          }
-        }, 1000);
-      }
+
+  // ゲーム開始
+  function startGameForRoom(roomId) {
+    const room = gameRooms.get(roomId);
+    if (!room) return;
+
+    room.gameState.isActive = true;
+    room.gameState.timeLeft = 180;
+    
+    // 全プレイヤーをリセット
+    const firstProblem = room.problemSequence[0];
+    room.players.forEach(player => {
+      player.problemIndex = 0;
+      player.currentNumbers = firstProblem.numbers;
     });
 
-    // 数字更新
-    socket.on('update-numbers', (roomId, numbers) => {
-      const room = gameRooms.get(roomId);
-      if (room) {
-        room.gameState.currentNumbers = numbers;
-        io.to(roomId).emit('numbers-updated', numbers);
-      }
+    broadcastToRoom(roomId, {
+      type: 'game-started',
+      payload: { gameState: room.gameState }
     });
 
-    // 正解提出（サーバー側で検証）
-    socket.on('submit-answer', (roomId, formula) => {
-      console.log(`Answer submitted: ${formula}, roomId: ${roomId}`);
-      
-      const room = gameRooms.get(roomId);
-      if (room) {
-        const player = room.players.find(p => p.socketId === socket.id);
-        if (player) {
-          console.log(`Player ${player.name} before update:`, { score: player.score, correct: player.correct, wrong: player.wrong });
-          
-          try {
-            // サーバー側で数字使用チェック
-            const isValidNumbers = validateNumbersUsage(formula, player.currentNumbers);
-            if (!isValidNumbers) {
-              socket.emit('answer-result', {
-                success: false,
-                message: '指定された数字のみを使用してください',
-                formula
-              });
-              return;
-            }
-
-            // サーバー側で計算結果チェック
-            const result = evaluateFormula(formula);
-            const isCorrect = Math.abs(result - 10) < 1e-10;
-            
-            if (isCorrect) {
-              player.score += 10;
-              player.correct += 1;
-              // 次の問題に進む
-              player.problemIndex += 1;
-              if (player.problemIndex < room.problemSequence.length) {
-                const nextProblem = room.problemSequence[player.problemIndex];
-                player.currentNumbers = nextProblem.numbers;
-                console.log(`Player ${player.name} advanced to problem ${player.problemIndex + 1} (${nextProblem.difficulty}): ${nextProblem.originalProblem}`);
-              } else {
-                // 問題が尽きた場合は最初から循環
-                player.problemIndex = 0;
-                const firstProblem = room.problemSequence[0];
-                player.currentNumbers = firstProblem.numbers;
-                console.log(`Player ${player.name} completed all problems, restarting from problem 1 (${firstProblem.difficulty}): ${firstProblem.originalProblem}`);
-              }
-              console.log(`Correct answer! Updated player ${player.name}:`, { score: player.score, correct: player.correct });
-              
-              socket.emit('answer-result', {
-                success: true,
-                isCorrect: true,
-                message: '正解！',
-                formula,
-                newNumbers: player.currentNumbers,
-                result
-              });
-            } else {
-              player.wrong += 1;
-              console.log(`Wrong answer (${result}). Updated player ${player.name}:`, { score: player.score, wrong: player.wrong });
-              
-              socket.emit('answer-result', {
-                success: true,
-                isCorrect: false,
-                message: `不正解... ${formula} = ${result} (10ではありません)`,
-                formula,
-                result
-              });
-            }
-
-            // 全プレイヤーに更新されたプレイヤーリストを送信
-            io.to(roomId).emit('players-updated', room.players);
-
-          } catch (error) {
-            console.error('Formula evaluation error:', error);
-            socket.emit('answer-result', {
-              success: false,
-              message: '数式が正しくありません',
-              formula
-            });
-          }
-        }
-      }
-    });
-
-    // スキップ
-    socket.on('skip-problem', (roomId) => {
-      console.log(`Skip problem requested, roomId: ${roomId}`);
-      
-      const room = gameRooms.get(roomId);
-      if (room) {
-        const player = room.players.find(p => p.socketId === socket.id);
-        if (player) {
-          console.log(`Player ${player.name} before skip:`, { score: player.score, skip: player.skip });
-          
-          player.skip += 1;
-          player.score = Math.max(0, player.score - 3); // スキップペナルティ
-          
-          console.log(`Player ${player.name} after skip:`, { score: player.score, skip: player.skip });
-          
-          // 次の問題に進む
-          player.problemIndex += 1;
-          if (player.problemIndex < room.problemSequence.length) {
-            const nextProblem = room.problemSequence[player.problemIndex];
-            player.currentNumbers = nextProblem.numbers;
-            console.log(`Player ${player.name} skipped to problem ${player.problemIndex + 1} (${nextProblem.difficulty}): ${nextProblem.originalProblem}`);
-          } else {
-            // 問題が尽きた場合は最初から循環
-            player.problemIndex = 0;
-            const firstProblem = room.problemSequence[0];
-            player.currentNumbers = firstProblem.numbers;
-            console.log(`Player ${player.name} completed all problems, restarting from problem 1 (${firstProblem.difficulty}): ${firstProblem.originalProblem}`);
-          }
-          console.log('Generated new numbers for skip:', player.currentNumbers);
-
-          socket.emit('skip-result', {
-            newNumbers: player.currentNumbers,
-            message: 'スキップしました（-3pt）',
-            score: player.score
-          });
-
-          // 全プレイヤーに更新されたプレイヤーリストを送信
-          console.log('All players after skip:', room.players.map(p => ({ name: p.name, score: p.score, skip: p.skip })));
-          io.to(roomId).emit('players-updated', room.players);
-        }
-      }
-    });
-
-    // ゲーム開始の共通ロジック
-    const startGameForRoom = (roomId, room, io) => {
-      room.gameState.isActive = true;
-      room.gameState.timeLeft = 180;
-      
-      // 全員が最初の問題から開始
-      room.currentProblemIndex = 0;
-      const firstProblem = room.problemSequence[0];
-      
-      console.log(`Game started with problem sequence. First problem (${firstProblem.difficulty}): ${firstProblem.originalProblem}`);
-      console.log('Problem sequence preview:', room.problemSequence.slice(0, 10).map((p, i) => `${i+1}. ${p.difficulty}:${p.originalProblem}`));
-      
-      // 全プレイヤーを最初の問題にリセット
-      room.players.forEach(player => {
-        player.problemIndex = 0;
-        player.currentNumbers = firstProblem.numbers;
+    // ゲームタイマー
+    const gameTimer = setInterval(() => {
+      room.gameState.timeLeft -= 1;
+      broadcastToRoom(roomId, {
+        type: 'time-update',
+        payload: { timeLeft: room.gameState.timeLeft }
       });
 
-      io.to(roomId).emit('game-started', {
-        gameState: room.gameState
-      });
-
-      // タイマー開始
-      const timer = setInterval(() => {
-        room.gameState.timeLeft -= 1;
-        io.to(roomId).emit('time-update', room.gameState.timeLeft);
-
-        if (room.gameState.timeLeft <= 0) {
-          clearInterval(timer);
-          room.gameState.isActive = false;
-          
-          // 最終結果を準備
-          const finalPlayers = room.players
-            .map(p => ({
-              name: p.name,
-              score: p.score,
-              correct: p.correct,
-              wrong: p.wrong,
-              skip: p.skip
-            }))
-            .sort((a, b) => b.score - a.score);
-
-          io.to(roomId).emit('game-ended', {
-            players: finalPlayers,
-            roomId: roomId,
-            gameTime: 180
-          });
-        }
-      }, 1000);
-    };
-
-    // ゲーム開始（手動）
-    socket.on('start-game', (roomId) => {
-      const room = gameRooms.get(roomId);
-      if (room && !room.gameState.isActive) {
-        // 既存のカウントダウンがあればキャンセル
-        if (room.waitingTimer) {
-          clearInterval(room.waitingTimer);
-          room.waitingTimer = null;
-        }
-        if (room.waitingCountdown !== null) {
-          room.waitingCountdown = null;
-        }
-        if (room.startCountdown !== null) {
-          room.startCountdown = null;
-        }
+      if (room.gameState.timeLeft <= 0) {
+        clearInterval(gameTimer);
+        room.gameState.isActive = false;
         
-        startGameForRoom(roomId, room, io);
-      }
-    });
+        const finalPlayers = room.players.map(p => ({
+          name: p.name,
+          score: p.score,
+          correct: p.correct,
+          wrong: p.wrong,
+          skip: p.skip
+        }));
 
-    // 切断処理
-    socket.on('disconnect', () => {
-      console.log('User disconnected:', socket.id);
-      
-      // 全ルームからプレイヤーを削除
-      gameRooms.forEach((room, roomId) => {
-        const playerIndex = room.players.findIndex(p => p.socketId === socket.id);
+        broadcastToRoom(roomId, {
+          type: 'game-ended',
+          payload: { players: finalPlayers, roomId, gameTime: 180 }
+        });
+      }
+    }, 1000);
+  }
+
+  // 切断処理
+  function handleDisconnect(clientId) {
+    const client = clients.get(clientId);
+    if (!client) return;
+
+    // 全ルームからプレイヤーを削除
+    client.rooms.forEach(roomId => {
+      const room = gameRooms.get(roomId);
+      if (room) {
+        const playerIndex = room.players.findIndex(p => p.clientId === clientId);
         if (playerIndex !== -1) {
           const player = room.players[playerIndex];
           room.players.splice(playerIndex, 1);
           
-          socket.to(roomId).emit('player-left', {
-            playerName: player.name,
-            players: room.players
+          broadcastToRoom(roomId, {
+            type: 'player-left',
+            payload: { playerName: player.name, players: room.players }
           });
 
-          // ルームが空になったら削除
           if (room.players.length === 0) {
             gameRooms.delete(roomId);
           }
         }
-      });
-    });
-  });
-
-  // 数式を評価する関数（簡易版）
-  function evaluateFormula(formula) {
-    // ×と÷を*と/に変換
-    const normalizedFormula = formula.replace(/×/g, '*').replace(/÷/g, '/');
-    
-    // 危険な文字をチェック
-    if (!/^[0-9+\-*/().\s]+$/.test(normalizedFormula)) {
-      throw new Error('不正な文字が含まれています');
-    }
-    
-    // evalを使用（本来はより安全なパーサーを使うべき）
-    try {
-      const result = Function('"use strict"; return (' + normalizedFormula + ')')();
-      return result;
-    } catch {
-      throw new Error('数式の評価に失敗しました');
-    }
-  }
-
-  // 数字の使用をチェックする関数
-  function validateNumbersUsage(formula, allowedNumbers) {
-    // 数式から数字を抽出
-    const numbersInFormula = formula.match(/\d+/g);
-    if (!numbersInFormula) return true;
-
-    const usedNumbers = numbersInFormula.map(Number);
-    const availableNumbers = [...allowedNumbers];
-
-    // 各使用された数字をチェック
-    for (const num of usedNumbers) {
-      const index = availableNumbers.indexOf(num);
-      if (index === -1) {
-        return false; // 使用不可能な数字
       }
-      availableNumbers.splice(index, 1); // 使用済みとしてマーク
-    }
+    });
 
-    return true;
+    clients.delete(clientId);
   }
 
-  httpServer
-    .once('error', (err) => {
-      console.error(err);
-      process.exit(1);
-    })
-    .listen(port, () => {
-      console.log(`> Ready on http://${hostname}:${port}`);
-    });
+  httpServer.listen(port, () => {
+    console.log(`> Ready on http://${hostname}:${port}`);
+    console.log(`> WebSocket server ready on ws://${hostname}:${port}/ws`);
+  });
 });
