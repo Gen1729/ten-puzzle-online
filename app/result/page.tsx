@@ -247,11 +247,19 @@ function ResultContent() {
 
         {/* アクションボタン */}
         <div className="flex flex-col sm:flex-row gap-4 justify-center">
-          <Link href="/online">
-            <button className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg text-lg transition-colors shadow-lg hover:shadow-xl">
-              もう一度プレイ
-            </button>
-          </Link>
+          {isSolo ? (
+            <Link href="/solo">
+              <button className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg text-lg transition-colors shadow-lg hover:shadow-xl">
+                もう一度プレイ
+              </button>
+            </Link>
+          ) : (
+            <Link href="/online">
+              <button className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-lg text-lg transition-colors shadow-lg hover:shadow-xl">
+                もう一度プレイ
+              </button>
+            </Link>
+          )}
           <Link href="/">
             <button className="w-full sm:w-auto bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-8 rounded-lg text-lg transition-colors shadow-lg hover:shadow-xl">
               ホームに戻る
