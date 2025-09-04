@@ -27,6 +27,7 @@ function ResultContent() {
   const [players, setPlayers] = useState<ResultPlayer[]>([]);
   const [roomId, setRoomId] = useState<string>('');
   const [gameTime, setGameTime] = useState<number>(180);
+  const [isSolo, setIsSolo] = useState<boolean>(false);
 
   // プレイヤーを順位順にソートし、同順位を考慮した順位を計算する関数
   const calculateRankings = (players: PlayerData[]) => {
@@ -72,13 +73,25 @@ function ResultContent() {
     const playersData = searchParams.get('players');
     const roomIdParam = searchParams.get('roomId');
     const gameTimeParam = searchParams.get('gameTime');
+    const isSoloParam = searchParams.get('isSolo') === 'true';
+
+    setIsSolo(isSoloParam);
 
     if (playersData) {
       try {
         const parsedPlayers = JSON.parse(decodeURIComponent(playersData));
-        // 新しい順位計算ロジックを使用
-        const playersWithRank = calculateRankings(parsedPlayers);
-        setPlayers(playersWithRank);
+        // ソロモードの場合は順位計算をスキップ
+        if (isSoloParam) {
+          const playersWithoutRank = parsedPlayers.map((player: PlayerData) => ({
+            ...player,
+            rank: 1 // ソロモードでは順位は意味がないが、型の整合性のため1に設定
+          }));
+          setPlayers(playersWithoutRank);
+        } else {
+          // 新しい順位計算ロジックを使用
+          const playersWithRank = calculateRankings(parsedPlayers);
+          setPlayers(playersWithRank);
+        }
       } catch (error) {
         console.error('Failed to parse players data:', error);
         router.push('/');
@@ -138,7 +151,11 @@ function ResultContent() {
             🎉 ゲーム終了！
           </h1>
           <p className="text-lg text-gray-600 dark:text-gray-300">
-            ルーム: {roomId} | ゲーム時間: {formatTime(gameTime)}
+            {isSolo ? (
+              `ゲーム時間: ${formatTime(gameTime)}`
+            ) : (
+              `ルーム: ${roomId} | ゲーム時間: ${formatTime(gameTime)}`
+            )}
           </p>
         </div>
 
@@ -147,19 +164,27 @@ function ResultContent() {
           {players.map((player) => (
             <div
               key={player.name}
-              className={`bg-gradient-to-r ${getRankColor(player.rank)} rounded-lg shadow-lg p-6 text-white transform transition-all duration-300 hover:scale-105`}
+              className={`${
+                isSolo 
+                  ? 'bg-gradient-to-r from-purple-400 to-purple-600' 
+                  : `bg-gradient-to-r ${getRankColor(player.rank)}`
+              } rounded-lg shadow-lg p-6 text-white transform transition-all duration-300 hover:scale-105`}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center space-x-4">
-                  <div className="text-4xl font-bold">
-                    {getRankIcon(player.rank)}
-                  </div>
+                  {!isSolo && (
+                    <div className="text-4xl font-bold">
+                      {getRankIcon(player.rank)}
+                    </div>
+                  )}
                   <div>
                     <h3 className="text-2xl font-bold">{player.name}</h3>
                     <p className="text-lg opacity-90">
-                      {player.rank === 1 ? 'チャンピオン！' : 
-                       player.rank === 2 ? '素晴らしい結果！' :
-                       player.rank === 3 ? 'よく頑張りました！' : 'お疲れ様でした！'}
+                      {isSolo ? 'お疲れ様でした！' : (
+                        player.rank === 1 ? 'チャンピオン！' : 
+                        player.rank === 2 ? '素晴らしい結果！' :
+                        player.rank === 3 ? 'よく頑張りました！' : 'お疲れ様でした！'
+                      )}
                     </p>
                   </div>
                 </div>
@@ -177,32 +202,45 @@ function ResultContent() {
         {/* 統計情報 */}
         <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6 mb-8">
           <h3 className="text-xl font-bold text-gray-800 dark:text-white mb-4">
-            📊 ゲーム統計
+            📊 {isSolo ? 'あなたの成績' : 'ゲーム統計'}
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="text-center">
               <div className="text-2xl font-bold text-blue-600">
-                {players.reduce((sum, p) => sum + p.correct, 0)}
+                {isSolo ? players[0]?.correct || 0 : players.reduce((sum, p) => sum + p.correct, 0)}
               </div>
-              <div className="text-sm text-gray-600 dark:text-gray-400">総正解数</div>
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                {isSolo ? '正解数' : '総正解数'}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-red-600">
-                {players.reduce((sum, p) => sum + p.wrong, 0)}
+                {isSolo ? players[0]?.wrong || 0 : players.reduce((sum, p) => sum + p.wrong, 0)}
               </div>
-              <div className="text-sm text-gray-600 dark:text-gray-400">総誤答数</div>
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                {isSolo ? '誤答数' : '総誤答数'}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-orange-600">
-                {players.reduce((sum, p) => sum + p.skip, 0)}
+                {isSolo ? players[0]?.skip || 0 : players.reduce((sum, p) => sum + p.skip, 0)}
               </div>
-              <div className="text-sm text-gray-600 dark:text-gray-400">総スキップ数</div>
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                {isSolo ? 'スキップ数' : '総スキップ数'}
+              </div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-green-600">
-                {Math.max(...players.map(p => p.score))}
+                {isSolo ? (
+                  players[0] ? Math.round((players[0].correct / (players[0].correct + players[0].wrong + players[0].skip)) * 100) : 0
+                ) : (
+                  Math.max(...players.map(p => p.score))
+                )}
+                {isSolo ? '%' : ''}
               </div>
-              <div className="text-sm text-gray-600 dark:text-gray-400">最高スコア</div>
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                {isSolo ? '正答率' : '最高スコア'}
+              </div>
             </div>
           </div>
         </div>

@@ -20,8 +20,8 @@ export default function Home() {
         {/* ボタン群 */}
         <div className="space-y-4">
           {/* プレイ開始ボタン */}
-          <Link href="/game">
-            <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-8 my-4 rounded-lg text-lg transition-colors duration-200 shadow-lg hover:shadow-xl">
+          <Link href="/solo">
+            <button className="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-4 px-8 rounded-lg text-lg transition-colors duration-200 shadow-lg hover:shadow-xl">
               ソロプレイ
             </button>
           </Link>
